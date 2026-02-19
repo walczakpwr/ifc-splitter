@@ -1,156 +1,93 @@
 import streamlit as st
 import ifcopenshell
+import ifcopenshell.api
 import tempfile
 import os
-import time
 
-# --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="IFC Extractor - Pro", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="IFC Splitter", layout="wide")
 
-st.title("🏗️ IFC Extractor (Z naprawą struktury Tekli)")
-st.markdown("Wybierz typy do zachowania. Skrypt automatycznie naprawi błędy z 'niewidzialnymi' elementami (np. osieroconymi ścianami z Tekla Structures).")
+st.title("IFC Splitter")
+st.markdown("Upload an IFC file, select entities to keep, and download the filtered file.")
 
-# --- INTERFEJS WYBORU TYPÓW ---
-col1, col2 = st.columns(2)
-
-with col1:
-    popularne_typy = [
-        "IfcWall", "IfcWallStandardCase", "IfcSlab", "IfcColumn", "IfcBeam", 
-        "IfcWindow", "IfcDoor", "IfcRoof", "IfcElementAssembly"
-    ]
-    wybrane_typy = st.multiselect(
-        "Zaznacz elementy do zachowania:", 
-        options=popularne_typy, 
-        default=["IfcWall", "IfcWallStandardCase"] # Dodano typ StandardCase!
-    )
-
-with col2:
-    dodatkowe_typy = st.text_input("Inne typy (po przecinku):")
-
-uploaded_file = st.file_uploader("Wybierz plik IFC", type=['ifc'])
+# File Uploader
+uploaded_file = st.file_uploader("Choose an IFC file", type=["ifc"])
 
 if uploaded_file is not None:
-    if st.button("🚀 Wyodrębnij wybrane elementy"):
+    # Reset file pointer to be sure
+    uploaded_file.seek(0)
+    
+    # Save uploaded file to temp file
+    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".ifc")
+    tfile.write(uploaded_file.read())
+    tfile.close()
+    
+    file_path = tfile.name
+    
+    try:
+        ifc_file = ifcopenshell.open(file_path)
+        st.success(f"Loaded {uploaded_file.name} successfully!")
         
-        typy_do_zachowania = set(wybrane_typy)
-        if dodatkowe_typy:
-            typy_do_zachowania.update([t.strip() for t in dodatkowe_typy.split(",") if t.strip()])
-            
-        status_text = st.empty()
-        progress_bar = st.progress(0)
-        start_time = time.time()
+        # Get all IfcProduct types (physical elements)
+        products = ifc_file.by_type("IfcProduct")
         
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_in:
-            tmp_in.write(uploaded_file.getvalue())
-            tmp_in_path = tmp_in.name
-            
-        try:
-            status_text.info("1/5 Wczytywanie pliku wejściowego...")
-            f = ifcopenshell.open(tmp_in_path)
-            progress_bar.progress(20)
-            
-            status_text.info("2/5 Odbudowa struktury budynku...")
-            g = ifcopenshell.file(schema=f.schema)
-            
-            # Kopiowanie czystych pięter i budynków
-            for cls in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"]:
-                for item in f.by_type(cls):
-                    g.add(item)
+        if not products:
+             st.warning("No IfcProduct found in the file.")
+             entity_types = []
+        else:
+             # Get unique types
+             entity_types = sorted(list(set([p.is_a() for p in products])))
+        
+        st.subheader("Filter Entities")
+        selected_types = st.multiselect("Select IFC Entities to KEEP:", entity_types, default=entity_types)
+        
+        if st.button("Generate Filtered IFC"):
+            if not selected_types:
+                st.warning("Please select at least one entity type.")
+            else:
+                with st.spinner("Processing..."):
                     
-            # Odtworzenie relacji między samymi piętrami a budynkiem
-            for rel in f.by_type("IfcRelAggregates"):
-                if rel.RelatingObject.is_a() in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey"]:
-                    valid = [c for c in rel.RelatedObjects if c.is_a() in ["IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"]]
-                    if valid:
-                        rel.RelatedObjects = valid
-                        g.add(rel)
-            progress_bar.progress(40)
+                    always_keep = ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcOpeningElement"]
+                    types_to_remove = [t for t in entity_types if t not in selected_types and t not in always_keep]
+                    st.write(f"DEBUG: Types selected to remove: {types_to_remove}")
+                    st.info("Note: Spatial structure (Project, Site, Building, Storey) and Openings are automatically preserved.")
                     
-            status_text.info("3/5 Mapowanie oryginalnych lokalizacji elementów (Detektyw)...")
-            container_map = {}
-            parent_map = {}
-            
-            # Zbieramy informacje gdzie co było przed usunięciem
-            for rel in f.by_type("IfcRelContainedInSpatialStructure"):
-                for el in rel.RelatedElements:
-                    container_map[el.id()] = rel.RelatingStructure
-            for rel in f.by_type("IfcRelAggregates"):
-                for child in rel.RelatedObjects:
-                    parent_map[child.id()] = rel.RelatingObject
+                    output_path = os.path.join(tempfile.gettempdir(), f"filtered_{uploaded_file.name}")
                     
-            def get_spatial_container(elem_id):
-                if elem_id in container_map: return container_map[elem_id]
-                if elem_id in parent_map: return get_spatial_container(parent_map[elem_id].id())
-                return None
-
-            status_text.info("4/5 Kopiowanie elementów i wiązanie ich z piętrami...")
-            containment_groups = {}
-            default_struct = f.by_type("IfcBuilding")[0] if f.by_type("IfcBuilding") else None
-            
-            # Kopiujemy elementy z wybranych typów
-            for ifc_type in typy_do_zachowania:
-                try:
-                    for el in f.by_type(ifc_type):
-                        g.add(el)
-                        # Szukamy do jakiego piętra powinny należeć
-                        struct = get_spatial_container(el.id())
-                        if not struct: struct = default_struct
-                        if struct: containment_groups.setdefault(struct.id(), []).append(el)
-                except Exception:
-                    pass
-            progress_bar.progress(60)
-            
-            status_text.info("5/5 Tworzenie nowych, czystych relacji w pliku...")
-            # Przypisujemy wybrane elementy bezpośrednio do właściwych pięter!
-            for struct_id, elements in containment_groups.items():
-                struct = f.by_id(struct_id)
-                g.createIfcRelContainedInSpatialStructure(
-                    GlobalId=ifcopenshell.guid.new(),
-                    OwnerHistory=struct.OwnerHistory if hasattr(struct, 'OwnerHistory') else None,
-                    Name="Naprawiona Struktura",
-                    RelatedElements=elements,
-                    RelatingStructure=struct
-                )
-                
-            # Wycinanie otworów w ścianach
-            for rel in f.by_type("IfcRelVoidsElement"):
-                if rel.RelatingBuildingElement.is_a() in typy_do_zachowania:
-                    g.add(rel)
-            
-            # Przywracanie materiałów i relacji elementów zachowanych
-            keep_ids = {e.id() for e in g}
-            for rel_class in ["IfcRelDefinesByProperties", "IfcRelDefinesByType", "IfcRelAssociatesMaterial"]:
-                for rel in f.by_type(rel_class):
-                    if hasattr(rel, "RelatedObjects"):
-                        valid = [e for e in rel.RelatedObjects if e.id() in keep_ids]
-                        if valid:
-                            rel.RelatedObjects = valid
-                            g.add(rel)
-            progress_bar.progress(90)
-            
-            status_text.info("Zapisywanie naprawionego pliku wynikowego...")
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_out:
-                tmp_out_path = tmp_out.name
-                
-            g.write(tmp_out_path)
-            progress_bar.progress(100)
-            
-            with open(tmp_out_path, "rb") as file:
-                out_bytes = file.read()
-                
-            status_text.success(f"✅ Sukces! Czas naprawy: {time.time() - start_time:.1f} s.")
-            st.balloons()
-            
-            st.download_button(
-                label="📥 Pobierz Poprawiony Plik",
-                data=out_bytes,
-                file_name=f"poprawiony_{uploaded_file.name}",
-                mime="application/octet-stream"
-            )
-
-        except Exception as e:
-            st.error(f"Wystąpił błąd: {e}")
-            
-        finally:
-            if os.path.exists(tmp_in_path): os.remove(tmp_in_path)
-            if 'tmp_out_path' in locals() and os.path.exists(tmp_out_path): os.remove(tmp_out_path)
+                    # Re-open fresh
+                    f_out = ifcopenshell.open(file_path)
+                    
+                    count_removed = 0
+                    count_found = 0
+                    
+                    # Optimization: Get all instances of types to remove
+                    for type_name in types_to_remove:
+                        instances = f_out.by_type(type_name)
+                        count_found += len(instances)
+                        st.write(f"DEBUG: Found {len(instances)} items of type {type_name}")
+                        
+                        for inst in instances:
+                            # Use API to safely remove product and its relationships
+                            try:
+                                ifcopenshell.api.run("root.remove_product", f_out, product=inst)
+                                count_removed += 1
+                            except Exception as e:
+                                st.error(f"Error removing {inst}: {e}")
+                            
+                    f_out.write(output_path)
+                    
+                    st.success(f"Done! Found {count_found} items to remove. Removed {count_removed} items.")
+                    
+                    with open(output_path, "rb") as f:
+                        st.download_button(
+                            label="Download Filtered IFC",
+                            data=f,
+                            file_name=f"filtered_{uploaded_file.name}",
+                            mime="application/x-step"
+                        )
+                        
+    except Exception as e:
+        st.error(f"Error reading IFC file: {e}")
+    finally:
+        # Cleanup temp file?
+        # os.unlink(file_path) 
+        pass
