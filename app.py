@@ -1,56 +1,91 @@
 import ifcopenshell
 import ifcopenshell.api
 import time
-
-# --- KONFIGURACJA ---
-INPUT_FILE = "twoj_duzy_plik.ifc" # Wpisz nazwę oryginalnego pliku!
-OUTPUT_FILE = "poprawne_sciany.ifc"
-# --------------------
+import os
+import tkinter as tk
+from tkinter import filedialog
 
 def main():
-    print(f"Otwieranie pliku {INPUT_FILE}...")
-    start = time.time()
+    print("--- START PROGRAMU ---")
     
-    try:
-        model = ifcopenshell.open(INPUT_FILE)
-    except Exception as e:
-        print(f"Błąd otwarcia pliku: {e}")
+    # 1. Wywołanie okienka wyboru pliku
+    root = tk.Tk()
+    root.withdraw() # Ukrywamy puste okienko w tle, zostawiamy tylko okno wyboru
+    
+    # Okienko zawsze na wierzchu (żeby nie uciekło pod inne okna)
+    root.attributes('-topmost', True) 
+    
+    print("Otwieram okno wyboru pliku... (może mignąć na pasku zadań)")
+    
+    sciezka_wejsciowa = filedialog.askopenfilename(
+        title="Wybierz duży plik IFC",
+        filetypes=[("Pliki IFC", "*.ifc"), ("Wszystkie pliki", "*.*")]
+    )
+    
+    # Jeśli użytkownik zamknie okienko bez wyboru pliku
+    if not sciezka_wejsciowa:
+        print("\nNie wybrano żadnego pliku. Przerywam działanie.")
+        input("\nNaciśnij ENTER, aby zamknąć...")
         return
 
-    print("Zbieranie elementów do usunięcia...")
+    # 2. Dynamiczne tworzenie nazwy pliku wyjściowego
+    # Np. "C:/Projekty/budynek.ifc" -> "C:/Projekty/budynek_tylko_sciany.ifc"
+    folder = os.path.dirname(sciezka_wejsciowa)
+    nazwa_pliku = os.path.basename(sciezka_wejsciowa)
+    nazwa_bez_rozszerzenia = os.path.splitext(nazwa_pliku)[0]
     
-    # Interesują nas tylko obiekty fizyczne (IfcElement). 
-    # To omija bezpiecznie "szkielet" budynku (piętra, osie itp.)
+    sciezka_wyjsciowa = os.path.join(folder, f"{nazwa_bez_rozszerzenia}_tylko_sciany.ifc")
+
+    print(f"\nWybrano plik: {nazwa_pliku}")
+    print("Otwieranie pliku (to potrwa dłuższą chwilę przy dużym IFC)...")
+    start = time.time()
+    
+    # 3. Wczytanie modelu
+    try:
+        model = ifcopenshell.open(sciezka_wejsciowa)
+    except Exception as e:
+        print(f"\nBŁĄD otwarcia pliku IFC: {e}")
+        input("\nNaciśnij ENTER, aby wyjść...")
+        return
+
+    print("\nSzukanie obiektów, które nie są ścianami...")
     wszystkie_elementy = model.by_type("IfcElement")
     
     do_usuniecia = []
     for element in wszystkie_elementy:
-        # Jeśli element NIE JEST ścianą, trafia na listę gilotyny
+        # Zostawiamy tylko IfcWall
         if not element.is_a("IfcWall"):
             do_usuniecia.append(element)
             
-    print(f"Znaleziono {len(wszystkie_elementy)} fizycznych elementów.")
-    print(f"Zostawiamy same ściany. Zostanie USUNIĘTYCH: {len(do_usuniecia)} obiektów.")
+    print(f"Liczba wszystkich elementów fizycznych: {len(wszystkie_elementy)}")
+    print(f"Liczba elementów do USUNIĘCIA: {len(do_usuniecia)}")
     
-    # BEZPIECZNE USUWANIE
-    # Używamy oficjalnego API biblioteki. Dba ono o to, by przy usunięciu
-    # elementu, usunąć też jego osieroconą geometrię i uniknąć "pomieszania ID".
-    print("Rozpoczynam inteligentne usuwanie (to może potrwać kilka minut)...")
+    if len(do_usuniecia) == 0:
+        print("Plik składa się z samych ścian lub nie ma obiektów. Nie ma czego usuwać.")
+        input("\nNaciśnij ENTER, aby wyjść...")
+        return
+
+    print("\nRozpoczynam inteligentne usuwanie (API ifcopenshell)...")
+    print("Proszę czekać, pasek postępu aktualizuje się co 50 elementów.")
     
+    # 4. Inteligentne usuwanie (usuwa obiekty wraz z ich "pustą" geometrią i relacjami)
     for i, element in enumerate(do_usuniecia):
         try:
             ifcopenshell.api.run("root.remove_product", model, product=element)
         except Exception as e:
-            # W rzadkich przypadkach dziwnych powiązań pomijamy błąd
+            # Pomiń błędy przy rzadkich typach relacji
             pass
             
-        if i % 100 == 0:
-            print(f"   Przetworzono {i}/{len(do_usuniecia)}...", end="\r")
+        if i % 50 == 0:
+            print(f"   Postęp: usunięto {i} / {len(do_usuniecia)}...", end="\r")
 
-    print(f"\nZapisywanie czystego pliku: {OUTPUT_FILE}...")
-    # Zapisujemy wyczyszczony graf do nowego pliku
-    model.write(OUTPUT_FILE)
-    print(f"Gotowe w {time.time() - start:.2f} s!")
+    print(f"\n\nZapisywanie czystego pliku do:\n{sciezka_wyjsciowa}")
+    model.write(sciezka_wyjsciowa)
+    
+    print(f"\nGOTOWE! Operacja zajęła {time.time() - start:.2f} sekund.")
+    print("Możesz teraz otworzyć nowy plik w BIM Vision.")
+    
+    input("\nNaciśnij ENTER, aby zamknąć program...")
 
 if __name__ == "__main__":
     main()
