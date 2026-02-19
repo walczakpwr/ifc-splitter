@@ -1,124 +1,56 @@
-import streamlit as st
 import ifcopenshell
-import ifcopenshell.util.element
-import tempfile
-import os
+import ifcopenshell.api
 import time
 
-# --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="IFC Filter", layout="wide")
+# --- KONFIGURACJA ---
+INPUT_FILE = "twoj_duzy_plik.ifc" # Wpisz nazwę oryginalnego pliku!
+OUTPUT_FILE = "poprawne_sciany.ifc"
+# --------------------
 
-st.title("🏗️ IFC Filter - Odchudzanie plików BIM")
-st.markdown("Wgraj plik IFC, wybierz elementy do zachowania i pobierz nową, lekką wersję.")
-
-# --- FUNKCJE (Z CACHOWANIEM DLA WYDAJNOŚCI) ---
-
-# To jest najważniejsza linijka. Dzięki niej plik ładuje się TYLKO RAZ.
-@st.cache_resource 
-def load_ifc(file_bytes):
-    # Streamlit trzyma plik w pamięci jako bajty, musimy zapisać go tymczasowo na dysk
-    # żeby ifcopenshell mógł go otworzyć
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp:
-        tmp.write(file_bytes.getvalue())
-        tmp_path = tmp.name
+def main():
+    print(f"Otwieranie pliku {INPUT_FILE}...")
+    start = time.time()
     
-    model = ifcopenshell.open(tmp_path)
-    return model, tmp_path
-
-def process_ifc(original_model, selected_types):
-    # Tworzymy nowy pusty model
-    new_model = ifcopenshell.file(schema=original_model.schema)
-    
-    # Kopiujemy Projekt (jednostki itp.)
-    for p in original_model.by_type("IfcProject"):
-        ifcopenshell.util.element.copy(new_model, p)
-        
-    # Pasek postępu
-    progress_bar = st.progress(0)
-    status_text = st.empty()
-    
-    total_elements = 0
-    copied_elements = 0
-    
-    # Zbieramy elementy do skopiowania
-    elements_to_copy = []
-    for ifc_type in selected_types:
-        found = original_model.by_type(ifc_type)
-        elements_to_copy.extend(found)
-    
-    total = len(elements_to_copy)
-    
-    if total == 0:
-        return None
-        
-    status_text.text(f"Rozpoczynam kopiowanie {total} elementów...")
-    
-    for i, element in enumerate(elements_to_copy):
-        ifcopenshell.util.element.copy(new_model, element)
-        
-        # Aktualizacja paska postępu co 10 elementów (żeby nie zamulać)
-        if i % 10 == 0:
-            progress = int((i / total) * 100)
-            progress_bar.progress(progress)
-            
-    progress_bar.progress(100)
-    status_text.text("Gotowe! Generowanie pliku do pobrania...")
-    
-    # Zapisz do tymczasowego pliku stringa
-    return new_model.to_string()
-
-# --- INTERFEJS UŻYTKOWNIKA ---
-
-uploaded_file = st.file_uploader("Wybierz plik IFC (max 200MB zalecane)", type=["ifc"])
-
-if uploaded_file is not None:
-    st.success(f"Wczytano plik: {uploaded_file.name}")
-    
-    # Wczytujemy model (z cache!)
     try:
-        model, path = load_ifc(uploaded_file)
-        
-        col1, col2 = st.columns(2)
-        
-        with col1:
-            st.subheader("1. Wybierz co chcesz zachować")
-            
-            # Lista popularnych typów do wyboru
-            all_types = ["IfcWall", "IfcSlab", "IfcWindow", "IfcDoor", "IfcRoof", "IfcColumn", "IfcBeam"]
-            
-            # Checkboxy
-            selected_types = []
-            for t in all_types:
-                # Domyślnie zaznacz IfcWall
-                default_val = True if t == "IfcWall" else False
-                if st.checkbox(f"Zachowaj {t}", value=default_val):
-                    selected_types.append(t)
-            
-            # Opcja dla zaawansowanych: wpisz własny typ
-            other_type = st.text_input("Inny typ (np. IfcFurnishingElement)")
-            if other_type:
-                selected_types.append(other_type)
-
-        with col2:
-            st.subheader("2. Podsumowanie")
-            st.write(f"Wybrane typy: {selected_types}")
-            
-            if st.button("🚀 URUCHOM FILTROWANIE"):
-                if not selected_types:
-                    st.error("Musisz wybrać przynajmniej jeden typ!")
-                else:
-                    result_string = process_ifc(model, selected_types)
-                    
-                    if result_string:
-                        st.balloons()
-                        st.download_button(
-                            label="📥 Pobierz przetworzony plik IFC",
-                            data=result_string,
-                            file_name=f"filtered_{uploaded_file.name}",
-                            mime="application/x-step"
-                        )
-                    else:
-                        st.warning("Nie znaleziono żadnych elementów wybranych typów w tym pliku.")
-
+        model = ifcopenshell.open(INPUT_FILE)
     except Exception as e:
-        st.error(f"Błąd podczas przetwarzania pliku: {e}")
+        print(f"Błąd otwarcia pliku: {e}")
+        return
+
+    print("Zbieranie elementów do usunięcia...")
+    
+    # Interesują nas tylko obiekty fizyczne (IfcElement). 
+    # To omija bezpiecznie "szkielet" budynku (piętra, osie itp.)
+    wszystkie_elementy = model.by_type("IfcElement")
+    
+    do_usuniecia = []
+    for element in wszystkie_elementy:
+        # Jeśli element NIE JEST ścianą, trafia na listę gilotyny
+        if not element.is_a("IfcWall"):
+            do_usuniecia.append(element)
+            
+    print(f"Znaleziono {len(wszystkie_elementy)} fizycznych elementów.")
+    print(f"Zostawiamy same ściany. Zostanie USUNIĘTYCH: {len(do_usuniecia)} obiektów.")
+    
+    # BEZPIECZNE USUWANIE
+    # Używamy oficjalnego API biblioteki. Dba ono o to, by przy usunięciu
+    # elementu, usunąć też jego osieroconą geometrię i uniknąć "pomieszania ID".
+    print("Rozpoczynam inteligentne usuwanie (to może potrwać kilka minut)...")
+    
+    for i, element in enumerate(do_usuniecia):
+        try:
+            ifcopenshell.api.run("root.remove_product", model, product=element)
+        except Exception as e:
+            # W rzadkich przypadkach dziwnych powiązań pomijamy błąd
+            pass
+            
+        if i % 100 == 0:
+            print(f"   Przetworzono {i}/{len(do_usuniecia)}...", end="\r")
+
+    print(f"\nZapisywanie czystego pliku: {OUTPUT_FILE}...")
+    # Zapisujemy wyczyszczony graf do nowego pliku
+    model.write(OUTPUT_FILE)
+    print(f"Gotowe w {time.time() - start:.2f} s!")
+
+if __name__ == "__main__":
+    main()
