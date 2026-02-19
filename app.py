@@ -21,7 +21,7 @@ def main():
         filetypes=[("Pliki IFC", "*.ifc"), ("Wszystkie pliki", "*.*")]
     )
     
-    # Jeśli użytkownik zamknie okienko (Anuluj)
+    # Jeśli zamkniesz okienko bez wyboru pliku (Anuluj)
     if not sciezka_wejsciowa:
         print("\nNie wybrano pliku. Zamykam program.")
         input("Naciśnij ENTER, aby wyjść...")
@@ -51,7 +51,7 @@ def main():
     
     do_usuniecia = []
     for element in wszystkie_elementy:
-        # Jeśli coś nie jest ścianą -> idzie na listę do usunięcia
+        # Jeśli coś nie jest ścianą (IfcWall) -> idzie na listę do usunięcia
         if not element.is_a("IfcWall"):
             do_usuniecia.append(element)
             
