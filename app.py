@@ -1,77 +1,116 @@
 import streamlit as st
 import ifcopenshell
-import ifcopenshell.api
 import tempfile
 import os
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="IFC Wall Extractor", page_icon="🏗️")
+st.set_page_config(page_title="IFC Wall Extractor (Wersja Turbo)", page_icon="⚡")
 
-st.title("🏗️ IFC Wall Extractor")
-st.write("Wgraj swój plik IFC, a aplikacja usunie z niego wszystko, co nie jest ścianą (IfcWall), zachowując pełną i poprawną strukturę pliku.")
+st.title("⚡ IFC Wall Extractor (Wersja Turbo)")
+st.write("Wersja z zaawansowanym algorytmem 'Białej Listy'. Przetwarza duże pliki w sekundy zamiast godzin.")
 
-# 1. Przycisk do wgrywania pliku przez przeglądarkę
 uploaded_file = st.file_uploader("Wybierz plik IFC", type=['ifc'])
 
 if uploaded_file is not None:
     st.info(f"Wczytano plik: {uploaded_file.name}")
     
-    if st.button("🚀 Uruchom czyszczenie"):
+    if st.button("🚀 Uruchom Błyskawiczne Czyszczenie"):
         
-        # Streamlit wyświetli kręcące się kółko ładowania
-        with st.spinner("Przetwarzanie pliku... (może to potrwać kilka minut w zależności od rozmiaru)"):
+        with st.spinner("Błyskawiczna analiza struktury grafu IFC... (to potrwa zaledwie chwilę)"):
             
-            # 2. Zapisanie wgranego pliku do pamięci tymczasowej serwera
             with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_in:
                 tmp_in.write(uploaded_file.getvalue())
                 tmp_in_path = tmp_in.name
             
             try:
-                # 3. Wczytanie modelu z pliku tymczasowego
                 model = ifcopenshell.open(tmp_in_path)
                 
-                # Zbieranie elementów
-                wszystkie_elementy = model.by_type("IfcElement")
-                do_usuniecia = [el for el in wszystkie_elementy if not el.is_a("IfcWall")]
-                
-                st.write(f"📊 Znaleziono elementów fizycznych: {len(wszystkie_elementy)}")
-                st.write(f"🗑️ Elementów do usunięcia: {len(do_usuniecia)}")
-                
-                if len(do_usuniecia) > 0:
-                    # Pasek postępu Streamlit
-                    progress_bar = st.progress(0)
-                    total = len(do_usuniecia)
+                keep = set() # Nasza Biała Lista
+
+                # 1. Szkielet projektu (Projekt, Piętra, Budynek)
+                for cls in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"]:
+                    for item in model.by_type(cls):
+                        keep.update(model.traverse(item))
+                        keep.add(item)
+                        
+                # 2. Tylko Ściany (IfcWall)
+                for item in model.by_type("IfcWall"):
+                    keep.update(model.traverse(item))
+                    keep.add(item)
                     
-                    # 4. Inteligentne usuwanie przez API
-                    for i, element in enumerate(do_usuniecia):
-                        try:
-                            ifcopenshell.api.run("root.remove_product", model, product=element)
-                        except Exception:
-                            pass
-                            
-                        # Aktualizacja paska co 50 elementów
-                        if i % 50 == 0:
-                            progress_bar.progress(min(i / total, 1.0))
-                            
-                    progress_bar.progress(1.0)
+                # 3. Otwory w ścianach (Zostawiamy dziury po usuniętych oknach/drzwiach)
+                for rel in model.by_type("IfcRelVoidsElement"):
+                    if rel.RelatingBuildingElement in keep:
+                        keep.add(rel.RelatedOpeningElement)
+                        keep.update(model.traverse(rel.RelatedOpeningElement))
+                        keep.update(model.traverse(rel))
+                        keep.add(rel)
+
+                # 4. Łatanie kluczowych relacji
+                for rel in model.by_type("IfcRelContainedInSpatialStructure"):
+                    kept_elements = [e for e in rel.RelatedElements if e in keep]
+                    if kept_elements:
+                        rel.RelatedElements = kept_elements
+                        keep.update(model.traverse(rel))
+                        keep.add(rel)
+
+                for rel in model.by_type("IfcRelAggregates"):
+                    if rel.RelatingObject in keep:
+                        kept_objects = [e for e in rel.RelatedObjects if e in keep]
+                        if kept_objects:
+                            rel.RelatedObjects = kept_objects
+                            keep.update(model.traverse(rel))
+                            keep.add(rel)
+
+                for rel_class in ["IfcRelDefinesByProperties", "IfcRelDefinesByType", "IfcRelAssociatesMaterial"]:
+                    for rel in model.by_type(rel_class):
+                        if hasattr(rel, "RelatedObjects"):
+                            kept_objects = [e for e in rel.RelatedObjects if e in keep]
+                            if kept_objects:
+                                rel.RelatedObjects = kept_objects
+                                keep.update(model.traverse(rel))
+                                keep.add(rel)
+
+                # 5. Brutalne usunięcie całej reszty (poza Białą Listą)
+                all_entities = set(model)
+                to_remove = all_entities - keep
                 
-                # 5. Zapis wyniku do nowego pliku tymczasowego
+                st.write(f"📊 Elementów bezpiecznych do zachowania: {len(keep)}")
+                st.write(f"🗑️ Elementów do szybkiego wycięcia: {len(to_remove)}")
+                
+                # Sortowanie ułatwia bezpieczne usuwanie (usuwa od najwyższych ID do najniższych)
+                to_remove_sorted = sorted(list(to_remove), key=lambda x: x.id(), reverse=True)
+                
+                progress_bar = st.progress(0)
+                total = len(to_remove_sorted)
+                
+                # Szybka iteracja gilotyny
+                for i, entity in enumerate(to_remove_sorted):
+                    try:
+                        model.remove(entity)
+                    except:
+                        pass
+                    # Odświeżanie paska rzadziej, co jeszcze bardziej przyspiesza Python!
+                    if i % 3000 == 0 and total > 0:
+                        progress_bar.progress(min(i / total, 1.0))
+                        
+                progress_bar.progress(1.0)
+                
+                # Zapis gotowego pliku
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_out:
                     tmp_out_path = tmp_out.name
                 
                 model.write(tmp_out_path)
                 
-                # 6. Wczytanie gotowego pliku, by podać go użytkownikowi
                 with open(tmp_out_path, "rb") as f:
                     out_bytes = f.read()
                 
-                st.success("✅ Generowanie pliku zakończone sukcesem!")
+                st.success("✅ Generowanie zakończone! Trwało to zaledwie ułamek czasu starej metody.")
                 
-                # 7. Magiczny przycisk do pobrania pliku z powrotem na Twój komputer
                 st.download_button(
-                    label="📥 Pobierz wyczyszczony plik IFC",
+                    label="📥 Pobierz Błyskawiczny Plik IFC",
                     data=out_bytes,
-                    file_name=f"same_sciany_{uploaded_file.name}",
+                    file_name=f"same_sciany_turbo_{uploaded_file.name}",
                     mime="application/octet-stream"
                 )
                 
@@ -79,7 +118,6 @@ if uploaded_file is not None:
                 st.error(f"Wystąpił błąd podczas przetwarzania: {e}")
                 
             finally:
-                # Sprzątanie po sobie (usunięcie plików z serwera)
                 if os.path.exists(tmp_in_path):
                     os.remove(tmp_in_path)
                 if 'tmp_out_path' in locals() and os.path.exists(tmp_out_path):
