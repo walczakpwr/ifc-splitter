@@ -5,24 +5,53 @@ import os
 import time
 
 # --- KONFIGURACJA STRONY ---
-st.set_page_config(page_title="IFC Wall Extractor (Bezpieczny)", page_icon="🧱", layout="centered")
+st.set_page_config(page_title="IFC Extractor", page_icon="🏗️", layout="wide")
 
-st.title("🧱 IFC Wall Extractor")
-st.markdown("Ta wersja buduje **całkowicie czysty plik IFC od zera**, przenosząc do niego tylko ściany, ich geometrię oraz niezbędny szkielet budynku (piętra, materiały).")
+st.title("🏗️ IFC Extractor")
+st.markdown("Wybierz, co chcesz zostawić w pliku. Reszta zostanie bezpiecznie wycięta, a struktura budynku zachowana.")
 
-uploaded_file = st.file_uploader("Wybierz plik IFC (Zalecane mniejsze pliki dla Streamlit)", type=['ifc'])
+# --- INTERFEJS WYBORU TYPÓW ---
+col1, col2 = st.columns(2)
+
+with col1:
+    popularne_typy = [
+        "IfcWall", "IfcSlab", "IfcColumn", "IfcBeam", 
+        "IfcWindow", "IfcDoor", "IfcRoof", "IfcStair"
+    ]
+    # IfcWall jest wybrane domyślnie
+    wybrane_typy = st.multiselect(
+        "Zaznacz elementy do zachowania:", 
+        options=popularne_typy, 
+        default=["IfcWall"]
+    )
+
+with col2:
+    dodatkowe_typy = st.text_input(
+        "Inne typy (jeśli brakuje na liście, wpisz po przecinku np. IfcFurnishingElement):"
+    )
+
+uploaded_file = st.file_uploader("Wybierz plik IFC", type=['ifc'])
 
 if uploaded_file is not None:
-    st.info(f"Wczytano plik: {uploaded_file.name}")
-    
-    if st.button("🚀 Wyodrębnij ściany"):
+    if st.button("🚀 Wyodrębnij wybrane elementy"):
         
-        # Puste miejsce na komunikaty o statusie
+        # Przygotowanie listy typów do zachowania
+        typy_do_zachowania = set(wybrane_typy)
+        if dodatkowe_typy:
+            # Rozdzielamy po przecinku i usuwamy białe znaki
+            typy_do_zachowania.update([t.strip() for t in dodatkowe_typy.split(",") if t.strip()])
+            
+        if not typy_do_zachowania:
+            st.warning("Musisz wybrać przynajmniej jeden typ do zachowania!")
+            st.stop()
+            
+        st.info(f"Filtruję plik pod kątem: {', '.join(typy_do_zachowania)}")
+        
         status_text = st.empty()
         progress_bar = st.progress(0)
         start_time = time.time()
         
-        # 1. Zapisujemy wgrany plik do pamięci tymczasowej serwera
+        # Zapis pliku do pamięci tymczasowej
         with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_in:
             tmp_in.write(uploaded_file.getvalue())
             tmp_in_path = tmp_in.name
@@ -32,31 +61,35 @@ if uploaded_file is not None:
             f = ifcopenshell.open(tmp_in_path)
             progress_bar.progress(20)
             
-            status_text.info("2/5 Inicjalizacja nowego, czystego pliku...")
+            status_text.info("2/5 Inicjalizacja czystego pliku...")
             g = ifcopenshell.file(schema=f.schema)
             
-            status_text.info("3/5 Odbudowa szkieletu projektu (Project, Building, Storey)...")
+            status_text.info("3/5 Odbudowa szkieletu projektu...")
             for cls in ["IfcProject", "IfcSite", "IfcBuilding", "IfcBuildingStorey", "IfcSpace"]:
                 for item in f.by_type(cls):
                     g.add(item)
             progress_bar.progress(40)
                     
-            status_text.info("4/5 Kopiowanie ścian i wycinanie otworów...")
-            walls = f.by_type("IfcWall")
-            for wall in walls:
-                g.add(wall) # To automatycznie zaciąga też geometrię ściany
+            status_text.info("4/5 Kopiowanie wybranych elementów i otworów...")
+            
+            # Kopiowanie tylko tych typów, które wybrał użytkownik
+            for ifc_type in typy_do_zachowania:
+                try:
+                    elementy = f.by_type(ifc_type)
+                    for el in elementy:
+                        g.add(el)
+                except Exception:
+                    pass # Jeśli danego typu nie ma w pliku, pomijamy
                 
-            # Wycinamy otwory w skopiowanych ścianach
+            # Wycinanie otworów dla zachowanych elementów
             for rel in f.by_type("IfcRelVoidsElement"):
-                if rel.RelatingBuildingElement.is_a("IfcWall"):
+                if rel.RelatingBuildingElement.is_a() in typy_do_zachowania:
                     g.add(rel)
             progress_bar.progress(60)
             
-            status_text.info("5/5 Łatanie grafu (przywracanie relacji i materiałów)...")
-            # Pobieramy ID elementów, które zostały przeniesione, aby nie kopiować śmieci
+            status_text.info("5/5 Łatanie grafu relacji...")
             keep_ids = {e.id() for e in g}
             
-            # Podpięcie ścian do pięter
             for rel in f.by_type("IfcRelContainedInSpatialStructure"):
                 if rel.RelatingStructure.id() in keep_ids:
                     valid = [e for e in rel.RelatedElements if e.id() in keep_ids]
@@ -64,7 +97,6 @@ if uploaded_file is not None:
                         rel.RelatedElements = valid
                         g.add(rel)
                         
-            # Relacje hierarchiczne
             for rel in f.by_type("IfcRelAggregates"):
                 if rel.RelatingObject.id() in keep_ids:
                     valid = [e for e in rel.RelatedObjects if e.id() in keep_ids]
@@ -72,7 +104,6 @@ if uploaded_file is not None:
                         rel.RelatedObjects = valid
                         g.add(rel)
                         
-            # Właściwości i materiały
             for rel_class in ["IfcRelDefinesByProperties", "IfcRelDefinesByType", "IfcRelAssociatesMaterial"]:
                 for rel in f.by_type(rel_class):
                     if hasattr(rel, "RelatedObjects"):
@@ -81,7 +112,6 @@ if uploaded_file is not None:
                             rel.RelatedObjects = valid
                             g.add(rel)
                             
-            # Warstwy (Layers)
             for rel in f.by_type("IfcPresentationLayerAssignment"):
                 if hasattr(rel, "AssignedItems"):
                     valid = [e for e in rel.AssignedItems if e.id() in keep_ids]
@@ -89,7 +119,6 @@ if uploaded_file is not None:
                         rel.AssignedItems = valid
                         g.add(rel)
 
-            # Połączenia między ścianami
             for rel in f.by_type("IfcRelConnectsPathElements"):
                 if rel.RelatingElement.id() in keep_ids and rel.RelatedElement.id() in keep_ids:
                     g.add(rel)
@@ -102,17 +131,18 @@ if uploaded_file is not None:
             g.write(tmp_out_path)
             progress_bar.progress(100)
             
-            # Wczytujemy zapisany plik do pamięci, by móc go pobrać
             with open(tmp_out_path, "rb") as file:
                 out_bytes = file.read()
                 
-            status_text.success(f"✅ Gotowe! Operacja zajęła {time.time() - start_time:.1f} sekundy.")
-            st.balloons()
+            status_text.success(f"✅ Gotowe! Operacja zajęła {time.time() - start_time:.1f} s.")
+            
+            # Bezpieczna nazwa pliku bez polskich znaków
+            safe_name = uploaded_file.name.replace(" ", "_")
             
             st.download_button(
-                label="📥 Pobierz plik (Tylko Ściany)",
+                label="📥 Pobierz przefiltrowany plik",
                 data=out_bytes,
-                file_name=f"sciany_{uploaded_file.name}",
+                file_name=f"filtered_{safe_name}",
                 mime="application/octet-stream"
             )
 
@@ -120,7 +150,6 @@ if uploaded_file is not None:
             st.error(f"Wystąpił błąd podczas przetwarzania: {e}")
             
         finally:
-            # Czyszczenie plików tymczasowych z serwera
             if os.path.exists(tmp_in_path):
                 os.remove(tmp_in_path)
             if 'tmp_out_path' in locals() and os.path.exists(tmp_out_path):
