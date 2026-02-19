@@ -1,88 +1,86 @@
+import streamlit as st
 import ifcopenshell
 import ifcopenshell.api
-import time
+import tempfile
 import os
-import tkinter as tk
-from tkinter import filedialog
 
-def main():
-    print("--- START PROGRAMU ---")
-    
-    # 1. Przygotowanie okienka wyboru pliku
-    root = tk.Tk()
-    root.withdraw() # Ukrywamy główne okno programu (żeby nie wisiało puste tło)
-    root.attributes('-topmost', True) # Wymuszamy, żeby okienko wyboru pojawiło się na wierzchu
-    
-    print("Otwieram okno wyboru pliku... (sprawdź pasek zadań, jeśli go nie widzisz)")
-    
-    # Wywołanie systemowego okienka
-    sciezka_wejsciowa = filedialog.askopenfilename(
-        title="Wybierz plik IFC do przetworzenia",
-        filetypes=[("Pliki IFC", "*.ifc"), ("Wszystkie pliki", "*.*")]
-    )
-    
-    # Jeśli zamkniesz okienko bez wyboru pliku (Anuluj)
-    if not sciezka_wejsciowa:
-        print("\nNie wybrano pliku. Zamykam program.")
-        input("Naciśnij ENTER, aby wyjść...")
-        return
+# --- KONFIGURACJA STRONY ---
+st.set_page_config(page_title="IFC Wall Extractor", page_icon="🏗️")
 
-    # 2. Generowanie nazwy pliku wyjściowego
-    # Skrypt sam wyciągnie folder i nazwę, np. "C:/budynek.ifc" -> "C:/budynek_tylko_sciany.ifc"
-    folder = os.path.dirname(sciezka_wejsciowa)
-    nazwa_pliku = os.path.basename(sciezka_wejsciowa)
-    nazwa_bez_rozszerzenia = os.path.splitext(nazwa_pliku)[0]
-    
-    sciezka_wyjsciowa = os.path.join(folder, f"{nazwa_bez_rozszerzenia}_tylko_sciany.ifc")
+st.title("🏗️ IFC Wall Extractor")
+st.write("Wgraj swój plik IFC, a aplikacja usunie z niego wszystko, co nie jest ścianą (IfcWall), zachowując pełną i poprawną strukturę pliku.")
 
-    print(f"\nWybrano plik: {sciezka_wejsciowa}")
-    print("Otwieranie pliku (to może potrwać przy dużym modelu)...")
-    start = time.time()
-    
-    try:
-        model = ifcopenshell.open(sciezka_wejsciowa)
-    except Exception as e:
-        print(f"\nBŁĄD otwarcia pliku IFC: {e}")
-        input("Naciśnij ENTER, aby wyjść...")
-        return
+# 1. Przycisk do wgrywania pliku przez przeglądarkę
+uploaded_file = st.file_uploader("Wybierz plik IFC", type=['ifc'])
 
-    print("\nSzukanie obiektów do usunięcia...")
-    wszystkie_elementy = model.by_type("IfcElement")
+if uploaded_file is not None:
+    st.info(f"Wczytano plik: {uploaded_file.name}")
     
-    do_usuniecia = []
-    for element in wszystkie_elementy:
-        # Jeśli coś nie jest ścianą (IfcWall) -> idzie na listę do usunięcia
-        if not element.is_a("IfcWall"):
-            do_usuniecia.append(element)
+    if st.button("🚀 Uruchom czyszczenie"):
+        
+        # Streamlit wyświetli kręcące się kółko ładowania
+        with st.spinner("Przetwarzanie pliku... (może to potrwać kilka minut w zależności od rozmiaru)"):
             
-    print(f"Liczba wszystkich elementów fizycznych: {len(wszystkie_elementy)}")
-    print(f"Liczba elementów, które zostaną USUNIĘTE: {len(do_usuniecia)}")
-    
-    if len(do_usuniecia) == 0:
-        print("Brak elementów do usunięcia (plik składa się z samych ścian).")
-        input("\nNaciśnij ENTER, aby wyjść...")
-        return
-
-    print("\nRozpoczynam usuwanie zbędnych elementów...")
-    print("Czekaj, pasek postępu aktualizuje się co 50 sztuk.")
-    
-    # 3. Inteligentne usuwanie (usuwa obiekty, ich geometrię i łata relacje)
-    for i, element in enumerate(do_usuniecia):
-        try:
-            ifcopenshell.api.run("root.remove_product", model, product=element)
-        except Exception as e:
-            pass # Ignorujemy błędy przy nietypowych powiązaniach
+            # 2. Zapisanie wgranego pliku do pamięci tymczasowej serwera
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_in:
+                tmp_in.write(uploaded_file.getvalue())
+                tmp_in_path = tmp_in.name
             
-        if i % 50 == 0:
-            print(f"   Postęp: usunięto {i} / {len(do_usuniecia)}...", end="\r")
-
-    print(f"\n\nZapisywanie czystego pliku do:\n{sciezka_wyjsciowa}")
-    model.write(sciezka_wyjsciowa)
-    
-    print(f"\nGOTOWE! Całość zajęła {time.time() - start:.2f} s")
-    
-    # 4. Blokada przed zamknięciem okna konsoli
-    input("\nNaciśnij ENTER, aby zamknąć program...")
-
-if __name__ == "__main__":
-    main()
+            try:
+                # 3. Wczytanie modelu z pliku tymczasowego
+                model = ifcopenshell.open(tmp_in_path)
+                
+                # Zbieranie elementów
+                wszystkie_elementy = model.by_type("IfcElement")
+                do_usuniecia = [el for el in wszystkie_elementy if not el.is_a("IfcWall")]
+                
+                st.write(f"📊 Znaleziono elementów fizycznych: {len(wszystkie_elementy)}")
+                st.write(f"🗑️ Elementów do usunięcia: {len(do_usuniecia)}")
+                
+                if len(do_usuniecia) > 0:
+                    # Pasek postępu Streamlit
+                    progress_bar = st.progress(0)
+                    total = len(do_usuniecia)
+                    
+                    # 4. Inteligentne usuwanie przez API
+                    for i, element in enumerate(do_usuniecia):
+                        try:
+                            ifcopenshell.api.run("root.remove_product", model, product=element)
+                        except Exception:
+                            pass
+                            
+                        # Aktualizacja paska co 50 elementów
+                        if i % 50 == 0:
+                            progress_bar.progress(min(i / total, 1.0))
+                            
+                    progress_bar.progress(1.0)
+                
+                # 5. Zapis wyniku do nowego pliku tymczasowego
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".ifc") as tmp_out:
+                    tmp_out_path = tmp_out.name
+                
+                model.write(tmp_out_path)
+                
+                # 6. Wczytanie gotowego pliku, by podać go użytkownikowi
+                with open(tmp_out_path, "rb") as f:
+                    out_bytes = f.read()
+                
+                st.success("✅ Generowanie pliku zakończone sukcesem!")
+                
+                # 7. Magiczny przycisk do pobrania pliku z powrotem na Twój komputer
+                st.download_button(
+                    label="📥 Pobierz wyczyszczony plik IFC",
+                    data=out_bytes,
+                    file_name=f"same_sciany_{uploaded_file.name}",
+                    mime="application/octet-stream"
+                )
+                
+            except Exception as e:
+                st.error(f"Wystąpił błąd podczas przetwarzania: {e}")
+                
+            finally:
+                # Sprzątanie po sobie (usunięcie plików z serwera)
+                if os.path.exists(tmp_in_path):
+                    os.remove(tmp_in_path)
+                if 'tmp_out_path' in locals() and os.path.exists(tmp_out_path):
+                    os.remove(tmp_out_path)
